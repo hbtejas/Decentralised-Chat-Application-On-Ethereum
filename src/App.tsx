@@ -21,9 +21,18 @@ import {
   Copy,
   LogOut,
   ShieldCheck,
-  Fingerprint
+  Fingerprint,
+  AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { 
+  isMetaMaskInstalled, 
+  requestAccount, 
+  getWalletInfo, 
+  onAccountChange, 
+  onNetworkChange,
+  getConnectedAccounts
+} from './utils/web3';
 
 interface Message {
   id: string;
@@ -128,7 +137,84 @@ export default function App() {
   });
 
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const unsubscribeRef = useRef<{ account?: () => void; network?: () => void }>({});
 
+  // Check for previously connected account on mount
+  useEffect(() => {
+    const checkPreviousConnection = async () => {
+      try {
+        const accounts = await getConnectedAccounts();
+        if (accounts.length > 0) {
+          const account = accounts[0];
+          const walletInfo = await getWalletInfo(account);
+          
+          setIsConnected(true);
+          setAccountType('wallet');
+          setWalletAddress(account);
+          setBalance(walletInfo.balance);
+          setProfile({
+            id: account,
+            username: account.substring(0, 6),
+            displayName: `${account.substring(0, 6)}...${account.substring(-4)}`,
+            avatar: avatarOptions[0],
+            isPublic: true,
+            walletAddress: account
+          });
+        }
+      } catch (error) {
+        console.log('No previous wallet connection found');
+      }
+    };
+
+    checkPreviousConnection();
+  }, []);
+
+  // Setup MetaMask listeners when wallet is connected
+  useEffect(() => {
+    if (!isConnected || accountType !== 'wallet') {
+      return;
+    }
+
+    try {
+      // Setup account change listener
+      const unsubscribeAccount = onAccountChange((accounts) => {
+        if (accounts.length === 0) {
+          disconnectAccount();
+        } else if (accounts[0] !== walletAddress) {
+          // Account changed - reconnect with new account
+          handleAccountChange(accounts[0]);
+        }
+      });
+
+      const unsubscribeNetwork = onNetworkChange((chainId) => {
+        // Network changed - refresh balance
+        handleNetworkChange();
+      });
+
+      unsubscribeRef.current = {
+        account: unsubscribeAccount,
+        network: unsubscribeNetwork
+      };
+    } catch (error) {
+      console.error('Error setting up listeners:', error);
+    }
+
+    // Cleanup function
+    return () => {
+      if (unsubscribeRef.current.account) {
+        unsubscribeRef.current.account();
+      }
+      if (unsubscribeRef.current.network) {
+        unsubscribeRef.current.network();
+      }
+    };
+  }, [isConnected, accountType, walletAddress]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // Auto-increment block number
   useEffect(() => {
     const interval = setInterval(() => {
       setBlockNumber(prev => prev + 1);
@@ -136,28 +222,74 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  const handleAccountChange = async (newAccount: string) => {
+    try {
+      setWalletAddress(newAccount);
+      const walletInfo = await getWalletInfo(newAccount);
+      setBalance(walletInfo.balance);
+      setProfile(prev => ({
+        ...prev,
+        id: newAccount,
+        username: newAccount.substring(0, 6),
+        displayName: `${newAccount.substring(0, 6)}...${newAccount.substring(-4)}`,
+        walletAddress: newAccount
+      }));
+    } catch (error) {
+      console.error('Error updating account:', error);
+    }
+  };
 
-  const connectWallet = () => {
+  const handleNetworkChange = async () => {
+    try {
+      if (walletAddress) {
+        const walletInfo = await getWalletInfo(walletAddress);
+        setBalance(walletInfo.balance);
+      }
+    } catch (error) {
+      console.error('Error updating balance after network change:', error);
+    }
+  };
+
+  const connectionErrorRef = useRef('');
+
+  const connectWallet = async () => {
     setIsConnecting(true);
-    setTimeout(() => {
+    connectionErrorRef.current = '';
+
+    try {
+      // Check if MetaMask is installed
+      if (!isMetaMaskInstalled()) {
+        throw new Error(
+          'MetaMask is not installed. Please install it from https://metamask.io'
+        );
+      }
+
+      // Request account access
+      const account = await requestAccount();
+      
+      // Get wallet info
+      const walletInfo = await getWalletInfo(account);
+
       setIsConnected(true);
       setAccountType('wallet');
-      setWalletAddress('0x71C...a923');
-      setBalance('24.51');
+      setWalletAddress(account);
+      setBalance(walletInfo.balance);
       setProfile({
-        id: '0x71C...a923',
-        username: 'CryptoUser',
-        displayName: 'CryptoUser.eth',
+        id: account,
+        username: account.substring(0, 6),
+        displayName: `${account.substring(0, 6)}...${account.substring(-4)}`,
         avatar: avatarOptions[0],
         isPublic: true,
-        walletAddress: '0x71C...a923'
+        walletAddress: account
       });
-      setIsConnecting(false);
       setShowAuthModal(false);
-    }, 1500);
+    } catch (error: any) {
+      connectionErrorRef.current = error.message;
+      console.error('Connection error:', error);
+      alert(`Failed to connect: ${error.message}`);
+    } finally {
+      setIsConnecting(false);
+    }
   };
 
   const createAccount = () => {
@@ -203,6 +335,11 @@ export default function App() {
 
   const toggleAccountPrivacy = () => {
     setProfile(prev => ({ ...prev, isPublic: !prev.isPublic }));
+  };
+
+  const handleCopyAddress = (address: string) => {
+    navigator.clipboard.writeText(address);
+    // Optional: Show toast notification here
   };
 
   const disconnectAccount = () => {
@@ -361,6 +498,21 @@ export default function App() {
                     <h2 className="text-xl font-bold text-white mb-2">Connect Wallet</h2>
                     <p className="text-gray-400 text-sm">Authorize with your cryptographic identity</p>
                   </div>
+
+                  {!isMetaMaskInstalled() && (
+                    <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-3 mb-4 flex items-start space-x-2">
+                      <AlertCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-red-400 text-sm font-medium">MetaMask Not Installed</p>
+                        <p className="text-red-300 text-xs mt-1">
+                          <a href="https://metamask.io" target="_blank" rel="noopener noreferrer" className="underline hover:no-underline">
+                            Install MetaMask
+                          </a>
+                          {' '}to use wallet connection
+                        </p>
+                      </div>
+                    </div>
+                  )}
                   
                   <div className="bg-gray-800/50 rounded-xl p-4 mb-4 border border-gray-700">
                     <div className="flex items-center space-x-3 mb-3">
@@ -370,19 +522,12 @@ export default function App() {
                         <p className="text-gray-400 text-xs">Most popular Web3 wallet</p>
                       </div>
                     </div>
-                    <div className="flex items-center space-x-3">
-                      <img src="https://cryptologos.cc/logos/walletconnect-wc-logo.png" alt="WalletConnect" className="h-10 w-10" />
-                      <div>
-                        <h3 className="text-white font-medium">WalletConnect</h3>
-                        <p className="text-gray-400 text-xs">Scan with your mobile wallet</p>
-                      </div>
-                    </div>
                   </div>
                   
                   <button
                     onClick={connectWallet}
-                    disabled={isConnecting}
-                    className="w-full flex items-center justify-center space-x-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium py-3 rounded-xl transition-all"
+                    disabled={isConnecting || !isMetaMaskInstalled()}
+                    className="w-full flex items-center justify-center space-x-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-indigo-600 text-white font-medium py-3 rounded-xl transition-all"
                   >
                     {isConnecting ? (
                       <>
@@ -574,7 +719,7 @@ export default function App() {
 
               <div className="space-y-4">
                 <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
-                  <label className="text-gray-300 text-sm font-medium mb-3 block flex items-center space-x-2">
+                  <label className="text-gray-300 text-sm font-medium mb-3 flex items-center space-x-2">
                     <Shield className="h-4 w-4" />
                     <span>Account Privacy</span>
                   </label>
@@ -615,13 +760,17 @@ export default function App() {
 
                 {accountType === 'wallet' && (
                   <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
-                    <label className="text-gray-300 text-sm font-medium mb-2 block flex items-center space-x-2">
+                    <label className="text-gray-300 text-sm font-medium mb-2 flex items-center space-x-2">
                       <Wallet className="h-4 w-4" />
                       <span>Wallet Address</span>
                     </label>
                     <div className="flex items-center justify-between">
                       <span className="text-white font-mono text-sm">{walletAddress}</span>
-                      <button className="text-indigo-400 hover:text-indigo-300">
+                      <button 
+                        onClick={() => handleCopyAddress(walletAddress)}
+                        className="text-indigo-400 hover:text-indigo-300 transition-colors"
+                        title="Copy to clipboard"
+                      >
                         <Copy className="h-4 w-4" />
                       </button>
                     </div>
@@ -630,7 +779,7 @@ export default function App() {
 
                 {accountType === 'wallet' && (
                   <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
-                    <label className="text-gray-300 text-sm font-medium mb-2 block flex items-center space-x-2">
+                    <label className="text-gray-300 text-sm font-medium mb-2 flex items-center space-x-2">
                       <Layers className="h-4 w-4" />
                       <span>ETH Balance</span>
                     </label>
@@ -818,7 +967,7 @@ export default function App() {
         </header>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 bg-gradient-to-b from-[#0B0E17] to-[#0D111D]">
+        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 bg-linear-to-b from-[#0B0E17] to-[#0D111D]">
           <AnimatePresence>
             {messages.map((msg) => (
               <motion.div
