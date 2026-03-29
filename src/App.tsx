@@ -119,6 +119,7 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authMode, setAuthMode] = useState<'choice' | 'create' | 'connect'>('choice');
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [connectionError, setConnectionError] = useState<string>('');
   
   // Create Account Form State
   const [newUsername, setNewUsername] = useState('');
@@ -250,11 +251,9 @@ export default function App() {
     }
   };
 
-  const connectionErrorRef = useRef('');
-
   const connectWallet = async () => {
     setIsConnecting(true);
-    connectionErrorRef.current = '';
+    setConnectionError('');
 
     try {
       // Check if MetaMask is installed
@@ -267,26 +266,44 @@ export default function App() {
       // Request account access
       const account = await requestAccount();
       
-      // Get wallet info
-      const walletInfo = await getWalletInfo(account);
-
-      setIsConnected(true);
-      setAccountType('wallet');
-      setWalletAddress(account);
-      setBalance(walletInfo.balance);
-      setProfile({
-        id: account,
-        username: account.substring(0, 6),
-        displayName: `${account.substring(0, 6)}...${account.substring(-4)}`,
-        avatar: avatarOptions[0],
-        isPublic: true,
-        walletAddress: account
-      });
+      // Get wallet info (with graceful error handling)
+      try {
+        const walletInfo = await getWalletInfo(account);
+        
+        setIsConnected(true);
+        setAccountType('wallet');
+        setWalletAddress(account);
+        setBalance(walletInfo.balance);
+        setProfile({
+          id: account,
+          username: account.substring(0, 6),
+          displayName: `${account.substring(0, 6)}...${account.substring(-4)}`,
+          avatar: avatarOptions[0],
+          isPublic: true,
+          walletAddress: account
+        });
+      } catch (balanceError: any) {
+        // Still connect even if balance fetch fails
+        console.warn('Balance fetch failed:', balanceError.message);
+        setIsConnected(true);
+        setAccountType('wallet');
+        setWalletAddress(account);
+        setBalance('0.00'); // Default to 0 balance
+        setProfile({
+          id: account,
+          username: account.substring(0, 6),
+          displayName: `${account.substring(0, 6)}...${account.substring(-4)}`,
+          avatar: avatarOptions[0],
+          isPublic: true,
+          walletAddress: account
+        });
+        setConnectionError('Balance could not be fetched. You may be on a network with RPC issues. Please try switching networks in MetaMask.');
+      }
+      
       setShowAuthModal(false);
     } catch (error: any) {
-      connectionErrorRef.current = error.message;
       console.error('Connection error:', error);
-      alert(`Failed to connect: ${error.message}`);
+      setConnectionError(error.message || 'Failed to connect wallet. Please try again.');
     } finally {
       setIsConnecting(false);
     }
@@ -445,7 +462,10 @@ export default function App() {
                   
                   <div className="space-y-3">
                     <button
-                      onClick={() => setAuthMode('connect')}
+                      onClick={() => {
+                        setConnectionError('');
+                        setAuthMode('connect');
+                      }}
                       className="w-full flex items-center space-x-4 p-4 bg-gray-800/50 border border-gray-700 rounded-xl hover:border-indigo-500/50 hover:bg-gray-800 transition-all group"
                     >
                       <div className="bg-indigo-600 p-3 rounded-xl group-hover:bg-indigo-500 transition-colors">
@@ -474,7 +494,10 @@ export default function App() {
                   </div>
                   
                   <button
-                    onClick={() => setShowAuthModal(false)}
+                    onClick={() => {
+                      setShowAuthModal(false);
+                      setConnectionError('');
+                    }}
                     className="mt-4 w-full text-gray-500 hover:text-gray-300 text-sm transition-colors"
                   >
                     Maybe later
@@ -485,7 +508,10 @@ export default function App() {
               {authMode === 'connect' && (
                 <>
                   <button
-                    onClick={() => setAuthMode('choice')}
+                    onClick={() => {
+                      setAuthMode('choice');
+                      setConnectionError('');
+                    }}
                     className="text-gray-400 hover:text-white text-sm mb-4 flex items-center"
                   >
                     ← Back
@@ -509,6 +535,19 @@ export default function App() {
                             Install MetaMask
                           </a>
                           {' '}to use wallet connection
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {connectionError && (
+                    <div className="bg-amber-500/20 border border-amber-500/50 rounded-lg p-3 mb-4 flex items-start space-x-2">
+                      <AlertCircle className="h-4 w-4 text-amber-400 mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-amber-400 text-sm font-medium">Connection Issue</p>
+                        <p className="text-amber-200 text-xs mt-1">{connectionError}</p>
+                        <p className="text-amber-300 text-xs mt-2">
+                          💡 Try switching to a different network in MetaMask or wait a moment and try again.
                         </p>
                       </div>
                     </div>

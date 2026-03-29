@@ -14,6 +14,53 @@ export interface WalletInfo {
 }
 
 /**
+ * Get a reliable provider with fallback options
+ */
+const getProvider = (provider?: any): ethers.JsonRpcProvider | ethers.BrowserProvider => {
+  try {
+    if (provider) {
+      return new ethers.BrowserProvider(provider);
+    }
+    
+    if (typeof window !== 'undefined' && window.ethereum) {
+      return new ethers.BrowserProvider(window.ethereum);
+    }
+
+    // Fallback to public JSON-RPC endpoints
+    return new ethers.JsonRpcProvider('https://eth.llamarpc.com');
+  } catch (error) {
+    // Final fallback
+    return new ethers.JsonRpcProvider('https://rpc.ankr.com/eth');
+  }
+};
+
+/**
+ * Get balance with retry logic
+ */
+const getBalanceWithRetry = async (
+  provider: ethers.Provider,
+  address: string,
+  maxRetries: number = 3
+): Promise<bigint> => {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const balance = await provider.getBalance(address);
+      return balance;
+    } catch (error: any) {
+      if (attempt === maxRetries) {
+        throw error;
+      }
+      
+      // Wait before retrying
+      const waitTime = 500 * attempt; // 500ms, 1s, 1.5s
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+  }
+  
+  throw new Error('Failed to fetch balance after retries');
+};
+
+/**
  * Check if MetaMask is installed
  */
 export const isMetaMaskInstalled = (): boolean => {
@@ -36,20 +83,23 @@ export const requestAccount = async (): Promise<string> => {
     });
 
     if (!accounts || accounts.length === 0) {
-      throw new Error('No accounts found');
+      throw new Error('No accounts found. Please create or import a wallet in MetaMask.');
     }
 
     return accounts[0];
   } catch (error: any) {
     if (error.code === 4001) {
-      throw new Error('User rejected the connection request');
+      throw new Error('You rejected the connection. Please approve the request to continue.');
     }
-    throw new Error(error.message || 'Failed to connect wallet');
+    if (error.code === -32002) {
+      throw new Error('MetaMask is busy. Please wait a moment and try again.');
+    }
+    throw new Error(error.message || 'Failed to connect wallet. Please try again.');
   }
 };
 
 /**
- * Get wallet information including balance
+ * Get wallet information including balance with better error handling
  */
 export const getWalletInfo = async (address: string): Promise<WalletInfo> => {
   if (!isMetaMaskInstalled()) {
@@ -57,9 +107,26 @@ export const getWalletInfo = async (address: string): Promise<WalletInfo> => {
   }
 
   try {
-    const provider = new ethers.BrowserProvider(window.ethereum);
-    const balance = await provider.getBalance(address);
-    const network = await provider.getNetwork();
+    const provider = getProvider(window.ethereum);
+    
+    // Get balance with retry
+    let balance: bigint;
+    try {
+      balance = await getBalanceWithRetry(provider, address, 3);
+    } catch (balanceError: any) {
+      console.warn('Balance fetch error, using cached/default balance:', balanceError.message);
+      // Return default balance instead of failing
+      balance = ethers.parseEther('0');
+    }
+
+    // Get network info
+    let network;
+    try {
+      network = await provider.getNetwork();
+    } catch (networkError: any) {
+      console.warn('Network detection error, assuming Ethereum Mainnet');
+      network = { chainId: 1n, name: 'mainnet' };
+    }
 
     // Convert balance to ETH
     const balanceInEth = ethers.formatEther(balance);
@@ -83,7 +150,11 @@ export const getWalletInfo = async (address: string): Promise<WalletInfo> => {
       chainName: chainNames[Number(network.chainId)] || `Chain ${network.chainId}`,
     };
   } catch (error: any) {
-    throw new Error(error.message || 'Failed to get wallet information');
+    // Provide helpful error message
+    if (error.message?.includes('RPC')) {
+      throw new Error('Network connection issue. Please check your internet and try again.');
+    }
+    throw new Error(error.message || 'Failed to get wallet information. Please try again.');
   }
 };
 
@@ -99,11 +170,19 @@ export const onAccountChange = (callback: (accounts: string[]) => void): (() => 
     callback(accounts);
   };
 
-  window.ethereum.on('accountsChanged', listener);
+  try {
+    window.ethereum.on('accountsChanged', listener);
+  } catch (error) {
+    console.error('Error setting up account listener:', error);
+  }
 
   // Return cleanup function
   return () => {
-    window.ethereum.removeListener('accountsChanged', listener);
+    try {
+      window.ethereum.removeListener('accountsChanged', listener);
+    } catch (error) {
+      console.error('Error removing account listener:', error);
+    }
   };
 };
 
@@ -119,11 +198,19 @@ export const onNetworkChange = (callback: (chainId: string) => void): (() => voi
     callback(chainId);
   };
 
-  window.ethereum.on('chainChanged', listener);
+  try {
+    window.ethereum.on('chainChanged', listener);
+  } catch (error) {
+    console.error('Error setting up network listener:', error);
+  }
 
   // Return cleanup function
   return () => {
-    window.ethereum.removeListener('chainChanged', listener);
+    try {
+      window.ethereum.removeListener('chainChanged', listener);
+    } catch (error) {
+      console.error('Error removing network listener:', error);
+    }
   };
 };
 
@@ -136,7 +223,7 @@ export const signMessage = async (address: string, message: string): Promise<str
   }
 
   try {
-    const provider = new ethers.BrowserProvider(window.ethereum);
+    const provider = getProvider(window.ethereum);
     const signer = await provider.getSigner(address);
     const signature = await signer.signMessage(message);
     return signature;
@@ -179,7 +266,8 @@ export const getConnectedAccounts = async (): Promise<string[]> => {
       method: 'eth_accounts',
     });
     return accounts || [];
-  } catch {
+  } catch (error) {
+    console.error('Error getting connected accounts:', error);
     return [];
   }
 };
