@@ -1,7 +1,4 @@
 {
-  "框架配置": {
-    "framework": "vite"
-  },
   "buildCommand": {
     "command": "npm run build",
     "outputDirectory": "dist"
